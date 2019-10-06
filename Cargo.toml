@@ -5,7 +5,7 @@ authors = ["Andrea Catania <info@andreacatania.com>"]
 edition = "2018"
 
 [dependencies]
-amethyst = {version = "0.13.0", features = ["vulkan"]}
+amethyst = {version = "0.13.1", features = ["vulkan"]}
 rand = "0.7.2"
-amethyst_physics = "0.0.1"
-amethyst_nphysics = "0.0.1"
+amethyst_physics = "0.1.0"
+amethyst_nphysics = "0.1.0"

@@ -1,9 +1,12 @@
 use amethyst::{
+    controls::{CursorHideSystem, MouseFocusUpdateSystemDesc},
     core::{
         math::Vector3,
         timing::Time,
         transform::{Transform, TransformBundle},
+        Parent,
     },
+    input::{InputBundle, StringBindings},
     prelude::*,
     renderer::{
         camera::Camera,
@@ -12,7 +15,9 @@ use amethyst::{
         plugins::{RenderShaded3D, RenderToWindow},
         rendy::mesh::{Normal, Position, Tangent, TexCoord},
         shape::Shape,
-        types, RenderingBundle,
+        types,
+        visibility::BoundingSphere,
+        RenderingBundle,
     },
     utils::application_root_dir,
     window::ScreenDimensions,
@@ -23,6 +28,8 @@ use rand::prelude::*;
 use amethyst_nphysics::NPhysicsBackend;
 use amethyst_physics::{prelude::*, PhysicsBundle};
 
+mod components;
+mod systems;
 mod visual_utils;
 
 #[derive(Default)]
@@ -32,9 +39,6 @@ struct Example {
 
 impl SimpleState for Example {
     fn on_start(&mut self, data: StateData<'_, GameData<'_, '_>>) {
-        // Add camera
-        add_camera_entity(data.world);
-
         // Add light
         add_light_entity(
             data.world,
@@ -52,26 +56,34 @@ impl SimpleState for Example {
         // Create floor
         create_floor(data.world);
 
+        // Create the character + camera.
+        create_character_entity(data.world);
+
         // Create Box
         add_cube_entity(data.world, Vector3::new(0.0, 6.0, 0.0));
     }
 
     fn update(&mut self, data: &mut StateData<'_, GameData<'_, '_>>) -> SimpleTrans {
-        // Spawn a new cube each 1 sec
+        // TODO this code must go inside a System.
+        // Spawn a new cube each X sec.
         {
             let time = data.world.fetch::<Time>();
             self.time_bank += time.delta_seconds();
         }
 
-        let time_threshold = 1.0; // Each 1 sec
-        let s = 10.0f32; // Scale
+        let time_threshold = 10.0; // Each 10 sec
+        let spawn_scale = 10.0f32; // Scale
 
         let mut rng = rand::thread_rng();
 
         while self.time_bank > time_threshold {
             add_cube_entity(
                 data.world,
-                Vector3::new(rng.gen::<f32>() * s, 6.0, rng.gen::<f32>() * s),
+                Vector3::new(
+                    rng.gen::<f32>() * spawn_scale - spawn_scale * 0.5,
+                    6.0,
+                    rng.gen::<f32>() * spawn_scale - spawn_scale * 0.5,
+                ),
             );
             self.time_bank -= time_threshold;
         }
@@ -89,8 +101,34 @@ fn main() -> Result<(), Error> {
     let display_config_path = app_root.join("config").join("display.ron");
 
     let game_data = GameDataBuilder::default()
+        .with_system_desc(
+            MouseFocusUpdateSystemDesc::default(),
+            "mouse_focus_update",
+            &[],
+        )
+        .with(
+            CursorHideSystem::default(),
+            "cursor_hide",
+            &["mouse_focus_update"],
+        )
+        .with_bundle(
+            InputBundle::<StringBindings>::new()
+                .with_bindings_from_file(assets_dir.join("input_bindings.ron"))
+                .unwrap(),
+        )?
+        .with(
+            systems::CameraMotionSystem::new(),
+            "camera_motion_system",
+            &["input_system"],
+        )
         .with_bundle(TransformBundle::new())?
-        .with_bundle(PhysicsBundle::<f32, NPhysicsBackend>::new())?
+        .with_bundle(
+            PhysicsBundle::<f32, NPhysicsBackend>::new().with_pre_physics(
+                systems::CharacterMotionControllerSystem::new(),
+                String::from("character_motion_controller"),
+                vec![],
+            ),
+        )?
         .with_bundle(
             RenderingBundle::<types::DefaultBackend>::new()
                 .with_plugin(
@@ -115,39 +153,18 @@ fn add_light_entity(world: &mut World, color: Srgb, direction: Vector3<f32>, int
     world.create_entity().with(light).build();
 }
 
-fn add_camera_entity(world: &mut World) {
-    let mut camera_transform = Transform::default();
-    camera_transform.set_translation_xyz(35.0, 20.0, 35.0);
-    camera_transform.face_towards(Vector3::new(0.0, 0.0, 0.0), Vector3::new(0.0, 1.0, 0.0));
-
-    let (width, height) = {
-        let dim = world.read_resource::<ScreenDimensions>();
-        (dim.width(), dim.height())
-    };
-
-    world
-        .create_entity()
-        .with(camera_transform)
-        .with(Camera::standard_3d(width, height))
-        .build();
-}
-
 fn create_floor(world: &mut World) {
     let shape = {
         let desc = ShapeDesc::Cube {
-            half_extents: Vector3::new(10.0, 0.2, 10.0),
+            half_extents: Vector3::new(20.0, 0.2, 20.0),
         };
         let physics_world = world.fetch::<PhysicsWorld<f32>>();
         physics_world.shape_server().create(&desc)
     };
 
     let rb = {
-        let rb_desc = RigidBodyDesc {
-            mode: BodyMode::Static,
-            mass: 1.0,
-            bounciness: 0.0,
-            friction: 0.05,
-        };
+        let mut rb_desc = RigidBodyDesc::default();
+        rb_desc.mode = BodyMode::Static;
 
         let physics_world = world.fetch::<PhysicsWorld<f32>>();
         physics_world.rigid_body_server().create(&rb_desc)
@@ -156,7 +173,7 @@ fn create_floor(world: &mut World) {
     let mesh = {
         let mesh_data: types::MeshData = Shape::Cube
             .generate::<(Vec<Position>, Vec<Normal>, Vec<Tangent>, Vec<TexCoord>)>(Some((
-                10.0, 0.2, 10.0,
+                20.0, 0.2, 20.0,
             )))
             .into();
 
@@ -174,6 +191,7 @@ fn create_floor(world: &mut World) {
         .create_entity()
         .with(mesh)
         .with(mat)
+        .with(BoundingSphere::origin(20.0))
         .with(Transform::default())
         .with(shape)
         .with(rb)
@@ -190,12 +208,7 @@ fn add_cube_entity(world: &mut World, pos: Vector3<f32>) {
     };
 
     let rb = {
-        let rb_desc = RigidBodyDesc {
-            mode: BodyMode::Dynamic,
-            mass: 1.0,
-            bounciness: 0.0,
-            friction: 0.05,
-        };
+        let rb_desc = RigidBodyDesc::default();
 
         let physics_world = world.fetch::<PhysicsWorld<f32>>();
         physics_world.rigid_body_server().create(&rb_desc)
@@ -226,8 +239,94 @@ fn add_cube_entity(world: &mut World, pos: Vector3<f32>) {
         .create_entity()
         .with(mesh)
         .with(mat)
+        .with(BoundingSphere::origin(1.0))
         .with(transf)
         .with(shape)
         .with(rb)
         .build();
+}
+
+/// Creates three entities:
+/// 1. The character (With RigidBody).
+/// 2. The camera boom handle attached to the character.
+/// 3. The camera attached to the camera bool handle.
+fn create_character_entity(world: &mut World) {
+    let character = {
+        let shape = {
+            let desc = ShapeDesc::Capsule {
+                half_height: 1.0,
+                radius: 0.5,
+            };
+            let physics_world = world.fetch::<PhysicsWorld<f32>>();
+            physics_world.shape_server().create(&desc)
+        };
+
+        let rb = {
+            let mut rb_desc = RigidBodyDesc::default();
+            rb_desc.lock_rotation_x = true;
+            rb_desc.lock_rotation_y = true;
+            rb_desc.lock_rotation_z = true;
+
+            let physics_world = world.fetch::<PhysicsWorld<f32>>();
+            physics_world.rigid_body_server().create(&rb_desc)
+        };
+
+        let mesh = {
+            let mesh_data: types::MeshData = Shape::Cube
+                .generate::<(Vec<Position>, Vec<Normal>, Vec<Tangent>, Vec<TexCoord>)>(Some((
+                    0.5, 1.5, 0.5,
+                )))
+                .into();
+
+            visual_utils::create_mesh(world, mesh_data)
+        };
+
+        let mat =
+            visual_utils::create_material(world, LinSrgba::new(0.65, 1.0, 0.90, 1.0), 0.0, 1.0);
+
+        let mut transf = Transform::default();
+        transf.set_translation(Vector3::new(-3.0, 2.0, -3.0));
+
+        world
+            .create_entity()
+            .with(mesh)
+            .with(mat)
+            .with(BoundingSphere::origin(1.0))
+            .with(transf)
+            .with(shape)
+            .with(rb)
+            .with(components::CharacterBody)
+            .build()
+    };
+
+    let camera_boom_handle = {
+        let mut transf = Transform::default();
+        transf.set_translation_y(1.5);
+
+        world
+            .create_entity()
+            .with(transf)
+            .with(components::CameraBoomHandle)
+            .with(Parent { entity: character })
+            .build()
+    };
+
+    let _camera = {
+        let mut camera_transform = Transform::default();
+        camera_transform.set_translation_xyz(0.0, 0.0, 6.0);
+
+        let (width, height) = {
+            let dim = world.read_resource::<ScreenDimensions>();
+            (dim.width(), dim.height())
+        };
+
+        world
+            .create_entity()
+            .with(camera_transform)
+            .with(Camera::standard_3d(width, height))
+            .with(Parent {
+                entity: camera_boom_handle,
+            })
+            .build()
+    };
 }
