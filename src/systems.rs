@@ -16,7 +16,10 @@ use crate::components::*;
 const MOUSE_SENSITIVITY: f32 = 0.2;
 const MAX_PITCH_ANGLE: f32 = 20.0;
 const FORCE_MULTIPLIER: f32 = 600.0;
-const JUMP_IMPULSE: f32 = 1.5;
+const JUMP_IMPULSE: f32 = 55.0;
+const JUMP_TIME: f32 = 0.25;
+const JUMP_DRAG_POWER: f32 = 5.0;
+const JUMP_MAX_BF: f32 = 0.7;
 
 #[derive(Debug)]
 pub(crate) struct CameraMotionSystem {
@@ -116,14 +119,22 @@ impl<'s> System<'s> for CameraMotionSystem {
 
 pub struct CharacterMotionControllerSystem {
     input_event_reader: Option<ReaderId<InputEvent<StringBindings>>>,
-    input_direction: Vector3<f32>,
+    horizontal_input: Vector3<f32>,
+    vertical_input: f32,
+    jump_time: f32,
+    /// Contact events storage, This motion system is designed to only control a
+    /// single character so store the contacts events here is safe.
+    contact_events: Vec<ContactEvent<f32>>,
 }
 
 impl CharacterMotionControllerSystem {
     pub fn new() -> Self {
         Self {
             input_event_reader: None,
-            input_direction: Vector3::zeros(),
+            horizontal_input: Vector3::zeros(),
+            vertical_input: 0.0,
+            jump_time: 0.0,
+            contact_events: Vec::new(),
         }
     }
 }
@@ -155,38 +166,38 @@ impl<'s> System<'s> for CharacterMotionControllerSystem {
             if let InputEvent::ActionPressed(action) = e {
                 match action.as_str() {
                     "Forward" => {
-                        self.input_direction.z -= 1.0;
+                        self.horizontal_input.z -= 1.0;
                     }
                     "Backward" => {
-                        self.input_direction.z += 1.0;
+                        self.horizontal_input.z += 1.0;
                     }
                     "Right" => {
-                        self.input_direction.x -= 1.0;
+                        self.horizontal_input.x -= 1.0;
                     }
                     "Left" => {
-                        self.input_direction.x += 1.0;
+                        self.horizontal_input.x += 1.0;
                     }
                     "Jump" => {
-                        self.input_direction.y += 1.0;
+                        self.vertical_input += 1.0;
                     }
                     _ => {}
                 }
             } else if let InputEvent::ActionReleased(action) = e {
                 match action.as_str() {
                     "Forward" => {
-                        self.input_direction.z += 1.0;
+                        self.horizontal_input.z += 1.0;
                     }
                     "Backward" => {
-                        self.input_direction.z -= 1.0;
+                        self.horizontal_input.z -= 1.0;
                     }
                     "Right" => {
-                        self.input_direction.x += 1.0;
+                        self.horizontal_input.x += 1.0;
                     }
                     "Left" => {
-                        self.input_direction.x -= 1.0;
+                        self.horizontal_input.x -= 1.0;
                     }
                     "Jump" => {
-                        self.input_direction.y -= 1.0;
+                        self.vertical_input -= 1.0;
                     }
                     _ => {}
                 }
@@ -199,25 +210,66 @@ impl<'s> System<'s> for CharacterMotionControllerSystem {
         }
 
         for (body_tag, _) in (&rigid_body_tags, &character_bodies).join() {
+            let is_in_air = {
+                let mut is_in_air = true;
+
+                physics_world
+                    .rigid_body_server()
+                    .contact_events(body_tag.get(), &mut self.contact_events);
+
+                for contact in &self.contact_events {
+                    // Angle in degree between the contact normal and a
+                    // perfectly vertical vector.
+                    let contact_angle = contact
+                        .normal
+                        .dot(&Vector3::new(0.0, 1.0, 0.0))
+                        .acos()
+                        .to_degrees();
+
+                    if contact_angle >= 45.0 {
+                        // Is sliding
+                        // TODO please support sliding
+                    } else {
+                        // Is on ground
+                        is_in_air = false;
+                        break;
+                    }
+                }
+                is_in_air
+            };
+
+            let mut motion_factor = 1.0;
+            let mut breaking_factor = 1.0;
+            if !is_in_air {
+                // On ground
+                // Apply jumping impulse
+                physics_world.rigid_body_server().apply_impulse(
+                    body_tag.get(),
+                    &Vector3::new(0.0, self.vertical_input * JUMP_IMPULSE, 0.0),
+                );
+                self.jump_time = 0.0;
+            }else{
+                // In Air
+                motion_factor = 0.2;
+                self.jump_time += physics_time.delta_seconds() * (1.0 / JUMP_TIME);
+                self.jump_time = self.jump_time.min(1.0);
+                breaking_factor = self.jump_time.powf(JUMP_DRAG_POWER).min(JUMP_MAX_BF);
+            }
+
             // Apply motion force
-            let mut force = camera_pos.transform_vector(&self.input_direction);
+            let mut force = camera_pos.transform_vector(&self.horizontal_input);
             force.y = 0.0; // Don't apply any force on Y axis
             physics_world
                 .rigid_body_server()
-                .apply_force(body_tag.get(), &(force * FORCE_MULTIPLIER));
-
-            // Apply jumping impulse
-            physics_world.rigid_body_server().apply_impulse(
-                body_tag.get(),
-                &Vector3::new(0.0, self.input_direction.y * JUMP_IMPULSE, 0.0),
-            );
+                .apply_force(body_tag.get(), &(force * FORCE_MULTIPLIER * motion_factor));
 
             // Compute breaking force
             let velocity = physics_world
                 .rigid_body_server()
                 .linear_velocity(body_tag.get());
-            let mut bk_force = (velocity / physics_time.delta_seconds()) * -1.0;
-            bk_force.y = 0.0; // Don't slow down the jump
+
+            let mut bk_force = (velocity / physics_time.delta_seconds()) * -1.0 * breaking_factor;
+            bk_force.y = bk_force.y.min(0.0); // Don't slow down when falling
             physics_world
                 .rigid_body_server()
                 .apply_force(body_tag.get(), &bk_force);

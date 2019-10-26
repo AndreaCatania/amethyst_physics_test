@@ -123,11 +123,14 @@ fn main() -> Result<(), Error> {
         )
         .with_bundle(TransformBundle::new())?
         .with_bundle(
-            PhysicsBundle::<f32, NPhysicsBackend>::new().with_pre_physics(
-                systems::CharacterMotionControllerSystem::new(),
-                String::from("character_motion_controller"),
-                vec![],
-            ),
+            PhysicsBundle::<f32, NPhysicsBackend>::new()
+                .with_frames_per_seconds(60)
+                .with_max_sub_steps(8) // Safety
+                .with_pre_physics(
+                    systems::CharacterMotionControllerSystem::new(),
+                    String::from("character_motion_controller"),
+                    vec![],
+                ),
         )?
         .with_bundle(
             RenderingBundle::<types::DefaultBackend>::new()
@@ -266,6 +269,9 @@ fn create_character_entity(world: &mut World) {
             rb_desc.lock_rotation_x = true;
             rb_desc.lock_rotation_y = true;
             rb_desc.lock_rotation_z = true;
+            rb_desc.contacts_to_report = 3;
+            rb_desc.friction = 0.0;
+            rb_desc.bounciness = 0.0;
 
             let physics_world = world.fetch::<PhysicsWorld<f32>>();
             physics_world.rigid_body_server().create(&rb_desc)
